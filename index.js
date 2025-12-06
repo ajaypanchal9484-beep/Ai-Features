@@ -2,6 +2,9 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import Groq from "groq-sdk";
+import { generateHabitPlan } from "./habitBuilder.js";
+import { generateMoodPlan } from "./moodPlanner.js";
+import { analyzeStress } from "./stressAnalyzer.js";
 
 dotenv.config();
 
@@ -14,9 +17,6 @@ const client = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
 
-// ------------------------------------
-//  CALORIE CALCULATION FUNCTION
-// ------------------------------------
 function calculateCalories(user) {
   const { age, gender, height, weight, activity, goal } = user;
 
@@ -38,9 +38,34 @@ function calculateCalories(user) {
   return Math.round(calories);
 }
 
-// ------------------------------------
-//  API ROUTE: GENERATE DIET PLAN
-// ------------------------------------
+app.post("/generateHabitPlan", async (req, res) => {
+  try {
+    const result = await generateHabitPlan(req.body);
+    res.json(result);
+  } catch (err) {
+    console.log(err);
+    res.json({ error: err.message });
+  }
+});
+
+app.post("/generateMoodPlan", async (req, res) => {
+  try {
+    const result = await generateMoodPlan(req.body);
+    res.json(result);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.post("/analyzeStress", async (req, res) => {
+  try {
+    const result = await analyzeStress(req.body);
+    res.json(result);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.post("/generateDiet", async (req, res) => {
   try {
     const user = req.body;
@@ -66,7 +91,6 @@ Return ONLY clean JSON in following format (do NOT add anything else):
 }
 `;
 
-    // Call GROQ Llama 3 model
     const completion = await client.chat.completions.create({
       model: "llama-3.1-8b-instant",
       messages: [
@@ -84,9 +108,6 @@ Return ONLY clean JSON in following format (do NOT add anything else):
   }
 });
 
-// ------------------------------------
-//  START SERVER
-// ------------------------------------
 app.listen(4000, () => {
   console.log("GROQ Diet AI running on http://localhost:4000");
 });
