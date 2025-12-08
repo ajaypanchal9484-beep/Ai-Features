@@ -5,6 +5,13 @@ import Groq from "groq-sdk";
 import { generateHabitPlan } from "./habitBuilder.js";
 import { generateMoodPlan } from "./moodPlanner.js";
 import { analyzeStress } from "./stressAnalyzer.js";
+import {
+  generateMealPlan,
+  saveMealPlanToFirestore,
+  getMealPlanHistory,
+  deleteMealPlan,
+  updateMealPlanNotes,
+} from "./mealPlanner.js";
 
 dotenv.config();
 
@@ -16,27 +23,6 @@ app.use(express.json());
 const client = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
-
-function calculateCalories(user) {
-  const { age, gender, height, weight, activity, goal } = user;
-
-  let bmr =
-    10 * weight + 6.25 * height - 5 * age + (gender === "male" ? 5 : -161);
-
-  const activityFactor = {
-    sedentary: 1.2,
-    light: 1.375,
-    moderate: 1.55,
-    active: 1.725,
-  };
-
-  let calories = bmr * (activityFactor[activity] || 1.2);
-
-  if (goal === "lose") calories -= 300;
-  if (goal === "gain") calories += 300;
-
-  return Math.round(calories);
-}
 
 app.post("/generateHabitPlan", async (req, res) => {
   try {
@@ -68,43 +54,135 @@ app.post("/analyzeStress", async (req, res) => {
 
 app.post("/generateDiet", async (req, res) => {
   try {
-    const user = req.body;
-    const calories = calculateCalories(user);
+    const { email, profile } = req.body;
 
-    const prompt = `
-Generate a healthy diet plan for a user.
+    if (!email || !profile) {
+      return res.status(400).json({
+        error: "Missing email or profile in request body",
+      });
+    }
 
-User info:
-Calories needed: ${calories}
-Veg: ${user.veg}
-Allergies: ${user.allergies}
-Goal: ${user.goal}
+    console.log(
+      `\n📋 NEW MEAL PLAN REQUEST - User: ${email}, Vegetarian: ${profile.is_vegetarian}`
+    );
 
-Return ONLY clean JSON in following format (do NOT add anything else):
-{
-  "calories": 2100,
-  "breakfast": [{ "item": "Oats", "quantity": "1 bowl", "cal": 350 }],
-  "lunch": [{ "item": "Veg Thali", "quantity": "1 plate", "cal": 600 }],
-  "snacks": [],
-  "dinner": [],
-  "summary": "Short summary..."
-}
-`;
+    // Generate meal plan with Groq
+    const result = await generateMealPlan(profile);
 
-    const completion = await client.chat.completions.create({
-      model: "llama-3.1-8b-instant",
-      messages: [
-        { role: "system", content: "You are a diet expert AI." },
-        { role: "user", content: prompt },
-      ],
-    });
+    if (result.success) {
+      // Save to Firestore
+      const saved = await saveMealPlanToFirestore(
+        email,
+        result.plan,
+        profile,
+        req.body.notes || null
+      );
 
-    const content = completion.choices[0]?.message?.content || "{}";
+      console.log(`✅ Meal plan generated and saved for ${email}\n`);
 
-    res.json(JSON.parse(content));
+      res.json({
+        success: true,
+        plan: result.plan,
+        firestoreId: saved.docId || null,
+        firestorePath: saved.path || null,
+        message: "Meal plan generated and saved",
+        timestamp: result.timestamp,
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: "Failed to generate meal plan",
+      });
+    }
   } catch (err) {
-    console.error(err);
-    res.json({ error: err.message });
+    console.error("❌ Error:", err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Meal plan generation failed",
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// GET meal plan history for a user (by email)
+// ─────────────────────────────────────────────────────────
+app.get("/mealHistory/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    const days = parseInt(req.query.days) || 30;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    console.log(`📖 Fetching ${days}-day meal history for: ${email}`);
+
+    const history = await getMealPlanHistory(email, days);
+
+    res.json({
+      success: true,
+      email: email,
+      history: history,
+      count: history.length,
+      days: days,
+    });
+  } catch (err) {
+    console.error("❌ Error:", err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Failed to retrieve meal history",
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// DELETE a specific meal plan
+// ─────────────────────────────────────────────────────────
+app.delete("/mealHistory/:email/:docId", async (req, res) => {
+  try {
+    const { email, docId } = req.params;
+
+    if (!email || !docId) {
+      return res.status(400).json({ error: "Email and docId are required" });
+    }
+
+    console.log(`🗑️  Deleting meal plan: ${docId} for ${email}`);
+
+    const result = await deleteMealPlan(email, docId);
+
+    res.json(result);
+  } catch (err) {
+    console.error("❌ Error:", err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Failed to delete meal plan",
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// UPDATE meal plan notes
+// ─────────────────────────────────────────────────────────
+app.put("/mealHistory/:email/:docId", async (req, res) => {
+  try {
+    const { email, docId } = req.params;
+    const { notes } = req.body;
+
+    if (!email || !docId) {
+      return res.status(400).json({ error: "Email and docId are required" });
+    }
+
+    console.log(`📝 Updating notes for meal plan: ${docId}`);
+
+    const result = await updateMealPlanNotes(email, docId, notes);
+
+    res.json(result);
+  } catch (err) {
+    console.error("❌ Error:", err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Failed to update meal plan",
+    });
   }
 });
 
