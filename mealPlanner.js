@@ -1,6 +1,7 @@
 import Groq from "groq-sdk";
 import admin from "firebase-admin";
 import dotenv from "dotenv";
+import { retrieveRelevantRecipes, searchRecipes } from "./vectorStore.js";
 
 dotenv.config();
 
@@ -92,7 +93,7 @@ const calculateCalories = (profile) => {
   return Math.round(tdee);
 };
 
-// Main meal plan generation function
+// Main meal plan generation function with RAG
 export const generateMealPlan = async (profile) => {
   const {
     age = 25,
@@ -113,6 +114,66 @@ export const generateMealPlan = async (profile) => {
 
   const allergiesStr = allergies.length ? allergies.join(", ") : "none";
 
+  // 🔍 RAG STEP 1: Search knowledge base for suitable recipes
+  console.log(
+    `🔍 RAG: Searching recipe database for ${
+      is_vegetarian ? "vegetarian" : "non-vegetarian"
+    } options...`
+  );
+
+  const searchResults = await searchRecipes({
+    vegetarian: is_vegetarian,
+    allergies: allergies,
+    calorieRange: { min: 150, max: 500 },
+    proteinMin: is_vegetarian ? 8 : 15,
+    topK: 15,
+  });
+
+  // 🔍 RAG STEP 2: Get additional recipes based on user's dietary goal and cuisine preference
+  const breakfastRecipes = searchResults
+    .filter(
+      (r) =>
+        r.description.toLowerCase().includes("breakfast") || r.calories < 300
+    )
+    .slice(0, 3);
+
+  const lunchRecipes = searchResults
+    .filter((r) => r.calories >= 300 && r.calories <= 450)
+    .slice(0, 3);
+
+  const dinnerRecipes = searchResults
+    .filter((r) => r.calories >= 250 && r.calories <= 400)
+    .slice(0, 3);
+
+  const snackRecipes = searchResults
+    .filter((r) => r.calories < 200)
+    .slice(0, 2);
+
+  // 📋 Format retrieved recipes as context for the LLM
+  const recipeContext = {
+    breakfast: breakfastRecipes,
+    lunch: lunchRecipes,
+    dinner: dinnerRecipes,
+    snacks: snackRecipes,
+  };
+
+  // Build recipe reference section
+  const breakfastRef = breakfastRecipes
+    .map((r) => `- ${r.name} (${r.calories}cal, ${r.protein}g protein)`)
+    .join("\n");
+
+  const lunchRef = lunchRecipes
+    .map((r) => `- ${r.name} (${r.calories}cal, ${r.protein}g protein)`)
+    .join("\n");
+
+  const dinnerRef = dinnerRecipes
+    .map((r) => `- ${r.name} (${r.calories}cal, ${r.protein}g protein)`)
+    .join("\n");
+
+  const snacksRef = snackRecipes
+    .map((r) => `- ${r.name} (${r.calories}cal, ${r.protein}g protein)`)
+    .join("\n");
+
   // Random cuisine styles for variety
   const cuisines = [
     "Indian",
@@ -125,7 +186,21 @@ export const generateMealPlan = async (profile) => {
   ];
   const randomCuisine = cuisines[Math.floor(Math.random() * cuisines.length)];
 
-  const prompt = `You are an expert nutritionist AI. Generate a PERSONALIZED daily meal plan that is unique and different from previous suggestions.
+  // 🎯 Enhanced prompt with RAG context
+  const prompt = `You are an expert nutritionist AI. Generate a PERSONALIZED daily meal plan using the provided recipe database.
+
+RAG RECIPE DATABASE - SUITABLE OPTIONS FOR THIS USER:
+✅ BREAKFAST OPTIONS:
+${breakfastRef || "- Standard breakfast options"}
+
+✅ LUNCH OPTIONS:
+${lunchRef || "- Standard lunch options"}
+
+✅ DINNER OPTIONS:
+${dinnerRef || "- Standard dinner options"}
+
+✅ SNACK OPTIONS:
+${snacksRef || "- Standard snack options"}
 
 USER PROFILE:
 - Age: ${age} years
@@ -146,6 +221,7 @@ ${
     : `✅ You can use all protein sources including chicken, fish, meat`
 }
 ❌ MUST AVOID all allergies: ${allergiesStr}
+✅ PREFERRED USE: Select recipes from the provided database when possible
 ✅ Focus cuisine: ${randomCuisine}
 ✅ Create UNIQUE meals - NOT generic suggestions
 ✅ Realistic portions and macro distribution
@@ -180,8 +256,13 @@ RETURN ONLY VALID JSON (NO EXTRA TEXT):
 }`;
 
   try {
-    console.log(`🍽️  Generating meal plan for: ${email}`);
+    console.log(`🍽️  Generating RAG-enhanced meal plan for: ${email}`);
     console.log(`   Vegetarian: ${is_vegetarian}, Goal: ${dietary_goal}`);
+    console.log(
+      `   📚 Using ${
+        Object.values(recipeContext).flat().length
+      } recipes from knowledge base`
+    );
 
     const completion = await groq.chat.completions.create({
       model: "llama-3.1-8b-instant",
@@ -189,7 +270,7 @@ RETURN ONLY VALID JSON (NO EXTRA TEXT):
         {
           role: "system",
           content:
-            "You are a professional nutritionist. Return ONLY valid JSON. STRICTLY RESPECT DIETARY RESTRICTIONS AND ALLERGIES.",
+            "You are a professional nutritionist. Return ONLY valid JSON. STRICTLY RESPECT DIETARY RESTRICTIONS AND ALLERGIES. Prefer recipes from the provided database.",
         },
         { role: "user", content: prompt },
       ],
@@ -261,11 +342,15 @@ RETURN ONLY VALID JSON (NO EXTRA TEXT):
     }
 
     console.log("✅ Validation passed - meal plan is safe");
+    console.log(
+      `✅ RAG Sources used: ${recipeContext.breakfast.length} breakfast + ${recipeContext.lunch.length} lunch + ${recipeContext.dinner.length} dinner + ${recipeContext.snacks.length} snacks recipes`
+    );
 
     return {
       success: true,
       plan: mealData,
       timestamp: new Date().toISOString(),
+      rag_sources: recipeContext,
     };
   } catch (error) {
     console.error("❌ Meal plan generation error:", error.message);

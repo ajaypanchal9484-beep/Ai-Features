@@ -12,6 +12,8 @@ import {
   deleteMealPlan,
   updateMealPlanNotes,
 } from "./mealPlanner.js";
+import { initializeVectorStore } from "./vectorStore.js";
+import { initializeRecipeDatabase } from "./recipeDatabase.js";
 
 dotenv.config();
 
@@ -22,6 +24,29 @@ app.use(express.json());
 // GROQ CLIENT (FREE)
 const client = new Groq({
   apiKey: process.env.GROQ_API_KEY,
+});
+
+// Initialize RAG system on startup
+let ragInitialized = false;
+const initializeRAG = async () => {
+  if (!ragInitialized) {
+    console.log("\n🚀 Initializing RAG System...");
+    try {
+      await initializeRecipeDatabase();
+      await initializeVectorStore();
+      ragInitialized = true;
+      console.log("✅ RAG System initialized successfully\n");
+    } catch (error) {
+      console.error("⚠️ RAG initialization warning:", error.message);
+      console.log("⚠️ Continuing without RAG - fallback mode\n");
+    }
+  }
+};
+
+// Middleware to ensure RAG is initialized
+app.use(async (req, res, next) => {
+  await initializeRAG();
+  next();
 });
 
 app.post("/generateHabitPlan", async (req, res) => {
